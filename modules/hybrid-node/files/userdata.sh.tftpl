@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euxo pipefail
+exec > >(tee -a /var/log/hybrid-bootstrap.log) 2>&1
+
+echo "[$(date -Is)] bootstrap start"
+
+# Resolver VPC (AmazonProvidedDNS)
+cat >/etc/resolv.conf <<'EOFRC'
+search ec2.internal
+nameserver 169.254.169.253
+EOFRC
+
+# Base + SSM Agent (AL2023 = dnf)
+for i in 1 2 3 4 5; do dnf -y update && break || sleep 20; done
+for i in 1 2 3 4 5; do dnf -y install amazon-ssm-agent curl tar shadow-utils && break || sleep 20; done
+systemctl enable --now amazon-ssm-agent || true
+
+# Registrar en SSM (Hybrid)
+for i in 1 2 3 4 5; do
+  /usr/bin/amazon-ssm-agent -register \
+    -code '${ssm_activation_code}' \
+    -id '${ssm_activation_id}' \
+    -region '${aws_region}' -y && break || sleep 10
+done
+systemctl restart amazon-ssm-agent || true
+
+# Descargar nodeadm (3 mirrors)
+( curl -fSL -o /usr/local/bin/nodeadm https://hybrid-assets.regionless.eks.amazonaws.com/releases/latest/bin/linux/amd64/nodeadm \
+  || curl -fSL -o /usr/local/bin/nodeadm https://eks-hybrid-downloads.s3.amazonaws.com/nodeadm/latest/linux-amd64/nodeadm \
+  || curl -fSL -o /usr/local/bin/nodeadm https://s3.us-west-2.amazonaws.com/eks-hybrid-releases/latest/bin/linux/amd64/nodeadm )
+chmod +x /usr/local/bin/nodeadm
+/usr/local/bin/nodeadm version || true
+
+# Instalar componentes de Kubernetes con credential-provider ssm
+for i in 1 2 3; do
+  /usr/local/bin/nodeadm install \
+    --kubernetes-version '${kubernetes_version}' \
+    --credential-provider ssm && break || sleep 15
+done
+
+# Config para unir al clúster (usa SSM creds del activation role)
+cat >/root/nodeconfig.yaml <<'EOFNC'
+cluster:
+  name: ${eks_cluster_name}
+  region: ${aws_region}
+node:
+  provider: hybrid
+  labels:
+    eks.amazonaws.com/compute-type: hybrid
+EOFNC
+
+/usr/local/bin/nodeadm init -c file:///root/nodeconfig.yaml || true
+
+# CNI: escribe 05-cilium.conflist cuando el agente esté listo
+mkdir -p /etc/cni/net.d || true
+
+systemctl is-active containerd kubelet || true
+systemctl enable --now containerd kubelet || true
+
+echo "[$(date -Is)] bootstrap end"

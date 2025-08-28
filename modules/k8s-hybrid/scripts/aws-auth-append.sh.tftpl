@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROLE_ARN="${activation_role_arn}"
+NS="kube-system"
+CM="aws-auth"
+
+KCFG="$(mktemp)"
+aws eks update-kubeconfig \
+  --name ${cluster_name} \
+  --region ${region} \
+%{ if profile != null && profile != "" }
+  --profile ${profile} \
+%{ endif }
+  --kubeconfig "$KCFG" >/dev/null
+
+export KUBECONFIG="$KCFG"
+
+CURRENT="$(kubectl get cm "$CM" -n "$NS" -o 'jsonpath={.data.mapRoles}' 2>/dev/null || true)"
+
+# Bloque a agregar (literal). Luego reemplazamos el placeholder por el ROLE_ARN real.
+read -r -d '' ADD_BLOCK <<'EOF' || true
+- rolearn: ROLE_ARN_PLACEHOLDER
+  username: system:node:{{SessionName}}
+  groups:
+  - system:bootstrappers
+  - system:nodes
+EOF
+
+ADD_BLOCK="$${ADD_BLOCK/ROLE_ARN_PLACEHOLDER/$${ROLE_ARN}}"
+
+if [ -z "$${CURRENT}" ]; then
+  echo "[aws-auth] Existe pero sin mapRoles, lo establezco"
+  NEW="$${ADD_BLOCK}"
+else
+  if echo "$${CURRENT}" | grep -q "$${ROLE_ARN}"; then
+    echo "[aws-auth] El mapeo ya existe, no hago cambios"
+    NEW="$${CURRENT}"
+  else
+    echo "[aws-auth] Agrego el mapeo del nodo híbrido a mapRoles"
+    NEW="$${CURRENT}
+$${ADD_BLOCK}"
+  fi
+fi
+
+PATCH="$(mktemp)"
+{
+  cat <<'YAML'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-auth
+  namespace: kube-system
+data:
+  mapRoles: |
+YAML
+  printf '%s\n' "$${NEW}" | sed 's/^/    /'
+} > "$${PATCH}"
+
+kubectl patch cm "$${CM}" -n "$${NS}" --type merge --patch-file "$${PATCH}"
+echo "[aws-auth] Estado final (primeros 160 líneas):"
+kubectl get cm "$${CM}" -n "$${NS}" -o yaml | sed -n '1,160p'

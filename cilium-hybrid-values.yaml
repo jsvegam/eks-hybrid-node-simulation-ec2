@@ -1,0 +1,20 @@
+# Mantener kube-proxy (no reemplazar)
+kubeProxyReplacement: false
+
+# Sustituye al antiguo "tunnel: vxlan"
+routingMode: tunnel
+tunnelProtocol: vxlan
+
+ipam:
+  mode: cluster-pool
+  operator:
+    clusterPoolIPv4PodCIDRList:
+      - 100.64.0.0/16  # no choque con tu VPC/Service CIDR
+
+# Ejecutar el DaemonSet sólo en el nodo híbrido
+nodeSelector:
+  eks.amazonaws.com/compute-type: hybrid
+
+# Tolerar taints del híbrido
+tolerations:
+  - operator: Exists
