@@ -105,25 +105,36 @@ ssh -J ec2-user@<bastion-public-dns> -i eks-hybrid-debug.pem ec2-user@<hybrid-pr
 
 En el nodo:
 
-set -euxo pipefail
+# Variables que ya usaste
 REGION=us-east-1
 CLUSTER=my-eks-cluster
+ACT_ID="9a6cd5ad-8612-4710-a958-bec0ceb1348f"
+ACT_CODE="U3EmoWKvEDGlmdp7a8O/"
 
-# 3.1 Conectividad básica
-echo "== resolv.conf =="; cat /etc/resolv.conf || true
-curl -s https://ifconfig.me || true   # Debe devolver IP pública (NAT OK)
+# 1) Archivo de configuración correcto para nodeadm
+sudo tee /etc/nodeadm/nodeConfig.yaml >/dev/null <<EOF
+apiVersion: node.eks.aws/v1alpha1
+kind: NodeConfig
+spec:
+  cluster:
+    name: ${CLUSTER}
+    region: ${REGION}
+  hybrid:
+    ssm:
+      activationId: ${ACT_ID}
+      activationCode: "${ACT_CODE}"
+EOF
 
-# 3.2 Instalar/registrar SSM
-sudo dnf -y install amazon-ssm-agent || true
-sudo systemctl enable --now amazon-ssm-agent
+# 2) (Opcional pero útil) Valida el archivo
+sudo /usr/local/bin/nodeadm config check -c file:///etc/nodeadm/nodeConfig.yaml
 
-# Sustituye con la Activation creada en el paso 2:
-ACT_ID="<<ACT_ID>>"
-ACT_CODE="<<ACT_CODE>>"
+# 3) Inicializa el nodo híbrido
+sudo /usr/local/bin/nodeadm init -c file:///etc/nodeadm/nodeConfig.yaml
 
-sudo /usr/bin/amazon-ssm-agent -register -id "$ACT_ID" -code "$ACT_CODE" -region "$REGION" -y || true
-sudo systemctl restart amazon-ssm-agent
-sudo systemctl status amazon-ssm-agent --no-pager -l || true
+# 4) Revisa kubelet
+sudo systemctl status kubelet --no-pager -l || true
+sudo journalctl -u kubelet -n 200 --no-pager || true
+
 
 # 3.3 nodeadm (URL correcta)
 curl -fsSLo /tmp/nodeadm https://hybrid-assets.eks.amazonaws.com/releases/latest/bin/linux/amd64/nodeadm
